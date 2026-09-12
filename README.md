@@ -10,6 +10,9 @@ its clause.
 go get github.com/gmb-lib/go-csc
 ```
 
+See [`CHANGELOG.md`](./CHANGELOG.md) for what each release changed, and what it means for code that
+already uses this library, before you bump.
+
 Standard library only. No logging, no storage, no key material: the library sends requests, reads
 answers, and hands the caller typed values.
 
