@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Every test names the clause of CSC API v2.2.0.0 it pins.
@@ -277,6 +278,8 @@ func FuzzParse(f *testing.F) {
 		var cr Credential
 		_ = json.Unmarshal(data, &cr)
 		_, _ = cr.LeafCertificate()
+		_ = cr.CheckSigning(1, time.Now())
+		_, _ = cr.SignAlgoFor(OIDSHA384)
 		var sh SignHashResponse
 		_ = json.Unmarshal(data, &sh)
 		_, _ = sh.Signature(0)

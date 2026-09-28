@@ -1,20 +1,29 @@
 package lvrtc
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha512"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gmb-lib/go-csc"
 )
 
-// The provider guide's two token responses (its sections 11.4 and 15.4), read as the profile's vocabulary.
+// The two token responses in the shape the provider returns them (measured on its pre-production
+// instance; the guide's sections 11.4 and 15.4 show the same members with expires_in 120).
 const (
-	credentialTokenJSON = `{"access_token":"a","token_type":"Bearer","expires_in":120,"authorization_details":[{"type":"sign_identity_registration","group_labels":["urn:csc:signatureQualifier:eu_eidas_qes"]}],"credentialID":"cred-1"}`
-	signTokenJSON       = `{"access_token":"b","token_type":"Bearer","expires_in":120,"authorization_details":[{"type":"digest_signing","digests":[{"value":"%s","algorithm":"SHA-384"}],"sign_identity_id":"cred-1","num_signatures":1}]}`
+	credentialTokenJSON = `{"access_token":"a","token_type":"Bearer","expires_in":600,"authorization_details":[{"type":"sign_identity_registration","group_labels":["urn:csc:signatureQualifier:eu_eidas_qes"]}],"credentialID":"cred-1"}`
+	signTokenJSON       = `{"access_token":"b","token_type":"Bearer","expires_in":600,"authorization_details":[{"type":"digest_signing","digests":[{"value":"%s","algorithm":"SHA-384"}],"sign_identity_id":"cred-1","num_signatures":1}]}`
 )
 
 func TestEIDFlowsAcrValues(t *testing.T) {
@@ -114,8 +123,58 @@ func fmtReplace(tpl, v string) string {
 	return string(out)
 }
 
+// Measured: the authorize hashes are accepted in standard Base64 only; a digest whose two spellings differ
+// (it carries both '+' and '/') must reach the wire in the standard alphabet and never in base64url.
+func TestSigningRequestSendsStandardBase64(t *testing.T) {
+	var d []byte
+	for i := 0; ; i++ {
+		sum := sha512.Sum384([]byte{byte(i), byte(i >> 8)})
+		std := base64.StdEncoding.EncodeToString(sum[:])
+		if strings.ContainsRune(std, '+') && strings.ContainsRune(std, '/') {
+			d = sum[:]
+			break
+		}
+	}
+	c := &csc.Client{ClientID: "app", Profile: Profile}
+	u, _ := url.Parse(c.AuthorizeURLClassic(SigningRequest("https://app/cb", "st", csc.PKCE{Challenge: "ch"}, EIDFlows{EIDScan}, "cred-1", [][]byte{d}, HashAlgorithmOIDSHA384)))
+	got := u.Query().Get("hashes")
+	if got != base64.StdEncoding.EncodeToString(d) || strings.ContainsAny(got, "-_") {
+		t.Fatalf("hashes %q: the provider refuses anything but standard Base64", got)
+	}
+}
+
+// The credential in the shape the provider returns it: a P-384 key offering ECDSA with SHA-256/384/512,
+// multisign 40, SCAL "2", a certificate valid for fifteen minutes.
+func TestShortTermCredential(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	issued := time.Now().Add(-10 * time.Minute) // registered ten minutes ago, then reused
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "short-term signer"}, NotBefore: issued, NotAfter: issued.Add(CredentialLifetime)}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, key.Public(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"description":"sign","key":{"status":"enabled","algo":["1.2.840.10045.4.3.2","1.2.840.10045.4.3.3","1.2.840.10045.4.3.4"],"len":384,"curve":"1.3.132.0.34"},` +
+		`"cert":{"status":"valid","certificates":["` + base64.StdEncoding.EncodeToString(der) + `"]},"auth":{"mode":"oauth2code"},"multisign":40,"signatureQualifier":"eu_eidas_qes","SCAL":"2"}`
+	var cred csc.Credential
+	if err := json.Unmarshal([]byte(body), &cred); err != nil {
+		t.Fatal(err)
+	}
+	if algo, err := cred.SignAlgoFor(HashAlgorithmOIDSHA384); err != nil || algo != SignAlgoECDSASHA384 {
+		t.Fatalf("signAlgo for SHA-384: %q %v", algo, err)
+	}
+	if err := cred.CheckSigning(1, time.Now().Add(2*time.Minute)); err != nil {
+		t.Fatalf("five minutes left, two needed: %v", err)
+	}
+	if err := cred.CheckSigning(1, time.Now().Add(6*time.Minute)); !errors.Is(err, csc.ErrCertificateValidity) {
+		t.Fatalf("a reused credential expires with its first registration: %v", err)
+	}
+	if err := cred.CheckSigning(41, time.Now()); !errors.Is(err, csc.ErrMultisign) {
+		t.Fatalf("41 signatures in one authorization: %v", err)
+	}
+}
+
 func TestProfileValues(t *testing.T) {
-	if Profile.HashesEncoding != csc.Base64Std || !Profile.AlwaysSendHashAlgorithmOID || !Profile.RequirePAR || Profile.TokenLifetime.Seconds() != 120 || Profile.RequestURILifetime.Seconds() != 60 {
+	if Profile.HashesEncoding != csc.Base64Std || !Profile.AlwaysSendHashAlgorithmOID || !Profile.RequirePAR || Profile.TokenLifetime.Seconds() != 600 || Profile.RequestURILifetime.Seconds() != 60 {
 		t.Fatalf("profile: %+v", Profile)
 	}
 }
