@@ -46,6 +46,8 @@ par, err := c.PushedAuthorize(ctx, lvrtc.CredentialRequest(redirectURI, state, p
 // send the browser to c.AuthorizeURL(par) — before par.ExpiresAt(); receive code + state on redirectURI
 tok, err := c.Token(ctx, code, redirectURI, pkce.Verifier)          // tok.CredentialID names the new credential
 cred, err := c.CredentialsInfo(ctx, tok.AccessToken, csc.CredentialsInfoRequest{CredentialID: tok.CredentialID, CertInfo: true, AuthInfo: true})
+err = cred.CheckSigning(len(digests), time.Now().Add(2*time.Minute)) // key enabled, multisign, and still valid when the signing lands
+algo, err := cred.SignAlgoFor(lvrtc.HashAlgorithmOIDSHA384)           // signAlgo from the credential's key/algo
 
 // 2. Authorize exactly these digests, then sign them — inside the token's lifetime.
 pkce2, _ := csc.NewPKCE()
@@ -55,9 +57,14 @@ par2, err := c.PushedAuthorize(ctx, lvrtc.SigningRequest(redirectURI, state2, pk
 sign, err := c.Token(ctx, code2, redirectURI, pkce2.Verifier)
 ds, err := lvrtc.Signing(sign)                                      // the provider's digest_signing entry
 if err := lvrtc.Bound(ds, cred.CredentialID, digests); err != nil { /* refuse: not what the person confirmed */ }
-out, err := c.SignHash(ctx, sign.AccessToken, csc.SignHashRequest{CredentialID: cred.CredentialID, Hashes: digests, HashAlgorithmOID: lvrtc.HashAlgorithmOIDSHA384, SignAlgo: lvrtc.SignAlgoECDSASHA384})
-sig, err := out.Signature(0)                                        // verify it against cred.LeafCertificate() before embedding
+out, err := c.SignHash(ctx, sign.AccessToken, csc.SignHashRequest{CredentialID: cred.CredentialID, Hashes: digests, HashAlgorithmOID: lvrtc.HashAlgorithmOIDSHA384, SignAlgo: algo})
+sig, err := out.Signature(0)
+cert, err := cred.Certificate()
+err = csc.VerifySignature(cert, algo, lvrtc.HashAlgorithmOIDSHA384, digests[0], sig) // before the value goes anywhere
 ```
+
+A refused `signHash` is not retried on the same token: with this provider the refusal spends the
+person's confirmation, and signing again takes a new second authorization.
 
 With `csc.Specification` instead of a provider profile the same calls speak the plain text of the
 standard: base64url `hashes` on the authorize parameter, `hashAlgorithmOID` omitted when `signAlgo`
@@ -67,9 +74,23 @@ implies the hash, the classic `AuthorizeURLClassic` available beside the pushed 
 
 | Package | Provider | What it fixes |
 |---|---|---|
-| `lvrtc` | eParaksts (LVRTC, Latvia) — TrustedX CSC layer, declares CSC 2.0.0.2 | PAR-only entry · `scope=credential` + `signatureQualifier=eu_eidas_qes` for a short-term credential (≈15 min) · a second, hash-bound authorization · the sign token as the `signHash` Bearer, no SAD · `hashAlgorithmOID` always · standard-Base64 `hashes` · 60 s `request_uri`, 120 s tokens · the `sign_identity_registration` / `digest_signing` vocabulary and `Bound`, the check the provider requires before `signHash` |
+| `lvrtc` | eParaksts (LVRTC, Latvia) — TrustedX CSC layer, declares CSC 2.0.0.2 | PAR-only entry · the eID card and eID Scan as the two user flows (`acr_values`) · `scope=credential` + `signatureQualifier=eu_eidas_qes` for a short-term credential, valid 15 minutes from its first registration and reused inside them · a second, hash-bound authorization · the sign token as the `signHash` Bearer, no SAD, single-use and spent by a refusal · `hashAlgorithmOID` always · standard-Base64 `hashes` (base64url is refused) · 60 s `request_uri`, 600 s tokens · DER ECDSA P-384 signatures · the `sign_identity_registration` / `digest_signing` vocabulary and `Bound`, the check the provider requires before `signHash` · the error codes it answers with |
 
 A profile is a value plus a few readers; adding a provider means adding a package, never editing the core.
+The `lvrtc` values were measured against the provider's pre-production service; its integration guide
+fills in only what a measurement could not observe.
+
+## Before and after `signHash`
+
+The core also carries the checks a signing application owes around the call, because every CSC
+integration owes them and none of them is provider-specific:
+
+- `Credential.CheckSigning(n, at)` — the key is enabled, the certificate valid (when the service says
+  so), `n` does not exceed `multisign`, and the moment `at` is inside the certificate's validity.
+- `Credential.SignAlgoFor(hashOID)` — the `signAlgo` for that digest, chosen from the credential's own
+  `key/algo` list, never guessed.
+- `VerifySignature(cert, signAlgo, hashOID, digest, signature)` — the returned value is a signature by
+  the credential's key over the digest that was sent (ECDSA as DER or raw r‖s, RSA PKCS #1 v1.5).
 
 ## Errors
 
@@ -80,8 +101,7 @@ never carry the client secret, a token or an authorization code. `ErrNoAccessTok
 
 ## Scope / non-goals
 
-- No signature verification and no container assembly — verify the returned value against the
-  credential's certificate and embed it with the tools that own those steps.
+- No container assembly — embed the verified signature with the tools that own that step.
 - No token storage, no refresh loop, no browser: the caller owns the redirect and the clocks
   (`PushedAuthorization.ExpiresAt`, `TokenResponse.ExpiresAt` say when they run out).
 - `signatures/signDoc`, `credentials/authorize` (explicit SAD), `extendTransaction`, asynchronous

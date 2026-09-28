@@ -2,24 +2,43 @@
 // LVRTC (Latvia), whose CSC layer runs on TrustedX and declares CSC API 2.0.0.2.
 //
 // Everything here is what that provider does where the specification leaves room
-// or where it departs from it, as its integration guide describes and as measured
-// against its pre-production instance. The core stays untouched: a caller uses the
-// csc package with Profile and the values below, and this package reads the
-// provider's own authorization_details vocabulary out of the token responses.
+// or where it departs from it, as measured against its pre-production instance
+// and, where a behaviour was not observable, as its integration guide describes.
+// The core stays untouched: a caller uses the csc package with Profile and the
+// values below, and this package reads the provider's own authorization_details
+// vocabulary out of the token responses.
 //
-// The flow this provider documents is two authorizations, both pushed (PAR) and
-// both confirmed by the person in the browser:
+// The flow is two authorizations, both pushed (PAR) and both confirmed by the
+// person in the browser:
 //
 //  1. scope=credential + signatureQualifier=eu_eidas_qes + the eID flow → a token
-//     that names a new SHORT-TERM credential (credentialID); its certificate is
-//     valid for about fifteen minutes;
+//     that names a SHORT-TERM credential (credentialID); its certificate is valid
+//     for fifteen minutes;
 //  2. scope=credential + credentialID + numSignatures + hashes + hashAlgorithmOID →
 //     a token bound to those digests; that token is the Bearer of signHash.
 //
-// There is no service-scope authorization and no SAD; hashAlgorithmOID is always
-// sent; the authorize `hashes` parameter is standard Base64 in the guide (the
-// specification says base64url — the profile follows the guide until measured
-// otherwise). Access tokens live 120 s, a request_uri 60 s.
+// What the measurements settled, and what a caller has to respect:
+//
+//   - The authorize hashes are STANDARD Base64. base64url is refused (the
+//     specification says base64url): the pushed request is accepted, and the
+//     refusal arrives on the redirect, before the person sees a login screen, as
+//     error=invalid_authorization_details.
+//   - The short-term credential is reused: a second registration inside its
+//     fifteen minutes returns the same credentialID and the same certificate, so
+//     the window runs from the first registration, not from each ceremony. Check
+//     the certificate against the moment of signing (csc.Credential.CheckSigning)
+//     before asking the person to confirm.
+//   - The sign token is single-use, and a refused signHash spends it too: after an
+//     error the person's confirmation is gone and a new signing authorization is
+//     needed. Never retry signHash on the same token.
+//   - Tokens are issued for 600 s (the guide says 120 s) and a request_uri for 60 s;
+//     the 60 s bound the opening of the authorize URL, not the login behind it.
+//   - hashAlgorithmOID is always sent, as the guide requires (the service signs
+//     without it, as the specification allows when signAlgo implies the digest).
+//   - Signatures are DER-encoded ECDSA over P-384 and verify against the
+//     credential's certificate; certificates "chain" is honoured.
+//   - There is no service-scope authorization, no SAD, and no eParaksts Mobile
+//     authentication on this layer: the eID card and eID Scan are its two flows.
 package lvrtc
 
 import (
@@ -48,17 +67,39 @@ var Profile = csc.Profile{
 	AlwaysSendHashAlgorithmOID: true,
 	RequirePAR:                 true,
 	RequestURILifetime:         60 * time.Second,
-	TokenLifetime:              120 * time.Second,
+	TokenLifetime:              600 * time.Second,
 }
+
+// CredentialLifetime is the validity of a short-term credential's certificate,
+// counted from the first registration that created it.
+const CredentialLifetime = 15 * time.Minute
 
 // The qualifier and the algorithm OIDs the provider's profile uses: a P-384 key,
 // SHA-384 digests, ECDSA-with-SHA-384 signatures. The credential's own key.algo is
-// the final word on signAlgo.
+// the final word on signAlgo (csc.Credential.SignAlgoFor).
 const (
 	SignatureQualifierQES  = "eu_eidas_qes"
-	HashAlgorithmOIDSHA384 = "2.16.840.1.101.3.4.2.2"
-	SignAlgoECDSASHA384    = "1.2.840.10045.4.3.3"
+	HashAlgorithmOIDSHA384 = csc.OIDSHA384
+	SignAlgoECDSASHA384    = csc.OIDECDSAWithSHA384
 	CurveOIDSecp384r1      = "1.3.132.0.34"
+)
+
+// Error codes the provider answers with, as measured. A code on the authorize
+// redirect arrives in its error parameter; the others are the error member of a
+// JSON body (csc.Error.Code) or, where noted, its error_description.
+const (
+	// ErrorInvalidAuthorizationDetails is the redirect error for authorize hashes the
+	// provider cannot read (base64url, for one).
+	ErrorInvalidAuthorizationDetails = "invalid_authorization_details"
+	// ErrorInvalidSAD is the error_description of a signHash for a hash the token
+	// was not bound to (400 invalid_request). The token is spent by it.
+	ErrorInvalidSAD = "invalidSad"
+	// ErrorInvalidCredentialID is the error_description for an unknown credentialID
+	// (400 invalid_request).
+	ErrorInvalidCredentialID = "invalidCredentialId"
+	// ErrorInsufficientPrivileges is the error of a signHash whose Bearer is the
+	// credential token instead of the sign token (403).
+	ErrorInsufficientPrivileges = "InsufficientPrivilegesException"
 )
 
 // EIDFlow is one of the provider's user-authentication flows, selected with the
@@ -207,7 +248,8 @@ var ErrNotBound = errors.New("lvrtc: the sign token is not bound to these digest
 // Bound checks the guide's rule for the integrator: before signHash, the token's
 // digests, credential and count must be exactly what the person confirmed. It
 // returns nil when the digest_signing entry names credentialID, exactly len(digests)
-// signatures, and every digest (in either Base64 alphabet).
+// signatures, and every digest (in either Base64 alphabet; the provider echoes the
+// standard one it was sent).
 func Bound(ds DigestSigning, credentialID string, digests [][]byte) error {
 	if ds.SignIdentityID != credentialID {
 		return fmt.Errorf("%w: sign_identity_id %q, credential %q", ErrNotBound, ds.SignIdentityID, credentialID)

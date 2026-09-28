@@ -29,7 +29,10 @@
 //	// send the user to c.AuthorizeURL(par); receive code + state on the redirect URI
 //	tok, _ := c.Token(ctx, code, redirectURI, pkce.Verifier)
 //	cred, _ := c.CredentialsInfo(ctx, tok.AccessToken, csc.CredentialsInfoRequest{CredentialID: tok.CredentialID})
+//	err = cred.CheckSigning(len(hashes), time.Now())                  // key, certificate, multisign
+//	algo, _ := cred.SignAlgoFor(csc.OIDSHA384)                        // signAlgo from key/algo
 //	sig, _ := c.SignHash(ctx, tok.AccessToken, csc.SignHashRequest{...})
+//	err = csc.VerifySignature(cert, algo, csc.OIDSHA384, hash, value) // before the value is embedded
 //
 // Nothing here logs, stores or prints a client secret, an access token or an
 // authorization code; errors carry the service's error body and status, never the
@@ -99,8 +102,9 @@ type Profile struct {
 	// entry into authorization. The core still offers the classic URL; a caller
 	// following the profile uses PushedAuthorize.
 	RequirePAR bool
-	// RequestURILifetime and TokenLifetime are the provider's documented lifetimes,
-	// informational — the values the service actually returns (expires_in) win.
+	// RequestURILifetime and TokenLifetime are the provider's lifetimes, as measured
+	// or documented; informational — the values the service actually returns
+	// (expires_in) win.
 	RequestURILifetime time.Duration
 	TokenLifetime      time.Duration
 }
@@ -645,12 +649,7 @@ func (c *Client) SignHash(ctx context.Context, accessToken string, r SignHashReq
 // impliesHash reports whether a signature algorithm OID names its hash algorithm
 // (ECDSA-with-SHAx, sha*WithRSAEncryption), so hashAlgorithmOID may be omitted.
 func impliesHash(signAlgo string) bool {
-	switch signAlgo {
-	case "1.2.840.10045.4.3.2", "1.2.840.10045.4.3.3", "1.2.840.10045.4.3.4", // ecdsa-with-SHA256/384/512
-		"1.2.840.113549.1.1.11", "1.2.840.113549.1.1.12", "1.2.840.113549.1.1.13": // sha256/384/512WithRSAEncryption
-		return true
-	}
-	return false
+	return signatureAlgorithms[signAlgo].digest != ""
 }
 
 // --- transport -------------------------------------------------------------------
