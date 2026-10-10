@@ -3,6 +3,28 @@
 All notable changes to this library are recorded here, newest first. Versions are git tags; the
 library follows semantic versioning once it reaches `v1.0.0`.
 
+## v0.2.1
+
+A security release with one thing to act on: **this library now needs Go 1.27.2**. No library code
+changed since v0.2.0, so nothing it does behaves differently.
+
+### Changed
+
+- **The module declares `go 1.27.2`** (was `1.27.0`). Go 1.27.2 fixes standard-library
+  vulnerabilities that this library's code reaches under 1.27.0. `govulncheck` found eight it calls before the move and none after it: GO-2026-6603, -6605, -6607,
+  -6608, -6610, -6611, -6613 and -6617, in `net/http`, `crypto/tls`, `net/textproto` and
+  `mime/multipart`. Raise your own module's `go` directive to `1.27.2`; from there the go command
+  downloads and uses that toolchain by itself. CI that reads `go-version-file: go.mod` follows with
+  no workflow edit.
+
+  This library still has **no module dependencies at all**.
+
+### Notes
+
+- The gate is green on Go 1.27.2: `go mod verify`, `go mod tidy -diff`, build, vet, `gofmt`,
+  golangci-lint v2.14.0, `go test -race` with **0 races**, and the fuzz target for 30 seconds with
+  no failing input; `govulncheck` reports nothing this library calls.
+
 ## v0.2.0
 
 The `lvrtc` profile now describes what the eParaksts CSC service **does**, measured end to end on its
