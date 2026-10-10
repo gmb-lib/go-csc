@@ -21,6 +21,9 @@ changed since v0.2.0, so nothing it does behaves differently.
 
 ### Notes
 
+- **CI's linter moved to golangci-lint v2.14.0** (was v2.13.1). The earlier release cannot read Go 1.27.2's
+  compiled standard library and stops before linting anything. No code changed with it.
+
 - The gate is green on Go 1.27.2: `go mod verify`, `go mod tidy -diff`, build, vet, `gofmt`,
   golangci-lint v2.14.0, `go test -race` with **0 races**, and the fuzz target for 30 seconds with
   no failing input; `govulncheck` reports nothing this library calls.
