@@ -1,3 +1,3 @@
 module github.com/gmb-lib/go-csc
 
-go 1.27.0
+go 1.27.2
