@@ -3,6 +3,11 @@
 All notable changes to this library are recorded here, newest first. Versions are git tags; the
 library follows semantic versioning once it reaches `v1.0.0`.
 
+## v0.2.2
+
+No library code changed. The module now requires Go 1.27.3 (was 1.27.2); CI follows the version
+in `go.mod`.
+
 ## v0.2.1
 
 A security release with one thing to act on: **this library now needs Go 1.27.2**. No library code
